@@ -57,16 +57,23 @@ else is plain HTML/CSS/JavaScript.
     self-check before finalizing output — but since prompt instructions
     alone can't be 100% reliable, there's also a code-level safety net:
     after each file's extraction, `_cqDetectFragments` (`ai-solve.js`) scans
-    the results for questions with fewer than 2 options and for gaps in the
-    document's own question numbering (e.g. 13, 15 present but 14 missing —
-    usually a page-split casualty), then `_cqRepairFragmentedQuestions`
-    sends the source file back to Gemini ONE more time with a narrow,
-    targeted job — just find and complete those specific flagged items —
-    and merges the fixes (or newly-recovered questions) back in. This
-    second pass is best-effort: if it fails or can't resolve an item, the
-    original extraction result is left untouched rather than the whole run
-    failing. The review screen's success message shows how many questions
-    this pass fixed or recovered (🔧 note).
+    the results for (a) questions with fewer than 2 options, (b) questions
+    whose options are complete but whose answer key is still missing (the
+    "answer was on the next page" case), and (c) gaps in the document's own
+    question numbering (e.g. 13, 15 present but 14 missing — usually a
+    page-split casualty; case-cluster dependents are excluded from this
+    check since their numbering often doesn't follow the main sequence).
+    `_cqRepairFragmentedQuestions` then sends the source file back to
+    Gemini ONE more time with a narrow, targeted job — just find and
+    complete those specific flagged items — and merges the fixes (or
+    newly-recovered questions) back in. A text-similarity check guards
+    against a "recovered" question actually being a duplicate of one
+    already in the list (a false-positive numbering-gap match), so a
+    falsely-detected gap doesn't inflate the question count. This second
+    pass is best-effort: if it fails or can't resolve an item, the original
+    extraction result is left untouched rather than the whole run failing.
+    The review screen's success message shows how many questions this pass
+    fixed or recovered (🔧 note).
   - Freshly extracted/generated questions are validated (question text
     present, 2+ filled options, a valid answer selected) before the initial
     save — the same rule the quiz editor already enforced on every later
