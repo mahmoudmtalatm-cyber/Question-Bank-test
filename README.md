@@ -50,6 +50,15 @@ else is plain HTML/CSS/JavaScript.
     answer that spans two pages (or an answer-key section that's separated
     from its questions) gets merged into one complete question instead of
     being truncated or dropped.
+  - Freshly extracted/generated questions are validated (question text
+    present, 2+ filled options, a valid answer selected) before the initial
+    save — the same rule the quiz editor already enforced on every later
+    edit (`saveGeneratedCustomQuiz` in `ai-solve.js`, matching
+    `saveCustomQuizEdits` in `quiz-editor.js`). Previously a question could
+    slip through extraction with only one option and save without
+    complaint, only to force you to add a second option the next time you
+    opened it for editing; now that's caught immediately on the review
+    screen, right after extraction, while it's easy to fix.
 - **Admin panel** — publish quizzes into the official bank, manage the
   curriculum tree (years/modules/subjects), manage other admins and their
   permissions, and edit/split/reorder published lectures.

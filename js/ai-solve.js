@@ -1207,6 +1207,29 @@ async function saveGeneratedCustomQuiz() {
   const titleInput = document.getElementById('cqTitleInput');
   const title = (titleInput && titleInput.value.trim()) || cqGeneratedTitle || 'Custom Quiz';
 
+  // Same validation the quiz editor enforces on save — applied HERE too so a
+  // question that only made it out of extraction with one option (e.g. the
+  // source only had one choice visible, or a choice got missed) is caught
+  // immediately, while it's still fresh in the review screen, rather than
+  // saving silently and only surfacing as a forced fix-up the next time this
+  // quiz happens to be opened for editing.
+  for (let i = 0; i < cqGeneratedQuestions.length; i++) {
+    const q = cqGeneratedQuestions[i];
+    if (!q.question || !q.question.trim()) {
+      alert(`Q${i + 1} needs question text before saving.`);
+      return;
+    }
+    const filledOpts = getOptionEntries(q).filter(([, v]) => v && v.trim());
+    if (filledOpts.length < 2) {
+      alert(`Q${i + 1} only has ${filledOpts.length} option${filledOpts.length === 1 ? '' : 's'} — add at least 2 before saving. Scroll to it below to fix.`);
+      return;
+    }
+    if (!q.answer || !q.options[q.answer] || !q.options[q.answer].trim()) {
+      alert(`Q${i + 1} needs a correct answer selected before saving.`);
+      return;
+    }
+  }
+
   _cqNormalizeCaseGroups(cqGeneratedQuestions);
   _stripEditorTransientFields(cqGeneratedQuestions);
 
