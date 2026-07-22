@@ -53,11 +53,20 @@ else is plain HTML/CSS/JavaScript.
     (some choices continue on the next page) and a total split (the stem
     ends a page with zero options, and the entire options list is an
     "orphan" block at the top of the next page with no stem of its own).
-    The prompt includes worked examples of both and asks the model to run a
-    self-check pass — including re-scanning page endings/openings for bare
-    stems and orphan option blocks it may have set aside, not just
-    checking its own draft list — before finalizing output, since plain
-    rules alone weren't reliably enough to stop this in practice.
+    The prompt includes worked examples of both and asks the model to
+    self-check before finalizing output — but since prompt instructions
+    alone can't be 100% reliable, there's also a code-level safety net:
+    after each file's extraction, `_cqDetectFragments` (`ai-solve.js`) scans
+    the results for questions with fewer than 2 options and for gaps in the
+    document's own question numbering (e.g. 13, 15 present but 14 missing —
+    usually a page-split casualty), then `_cqRepairFragmentedQuestions`
+    sends the source file back to Gemini ONE more time with a narrow,
+    targeted job — just find and complete those specific flagged items —
+    and merges the fixes (or newly-recovered questions) back in. This
+    second pass is best-effort: if it fails or can't resolve an item, the
+    original extraction result is left untouched rather than the whole run
+    failing. The review screen's success message shows how many questions
+    this pass fixed or recovered (🔧 note).
   - Freshly extracted/generated questions are validated (question text
     present, 2+ filled options, a valid answer selected) before the initial
     save — the same rule the quiz editor already enforced on every later
