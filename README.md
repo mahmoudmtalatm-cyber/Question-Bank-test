@@ -43,6 +43,13 @@ else is plain HTML/CSS/JavaScript.
     requests/minute per project) even when several bulk tools are running
     at once across different editors. If your key is on a paid tier with
     a much higher limit, that constant can be safely lowered.
+  - Extraction sends the whole source PDF to Gemini in a single request
+    (not split page-by-page), and the extraction prompt (`CQ_EXTRACTION_PROMPT`
+    in `gemini-uploads.js`) explicitly instructs the model to treat page
+    breaks as non-semantic — so a question's stem, choices, or marked
+    answer that spans two pages (or an answer-key section that's separated
+    from its questions) gets merged into one complete question instead of
+    being truncated or dropped.
 - **Admin panel** — publish quizzes into the official bank, manage the
   curriculum tree (years/modules/subjects), manage other admins and their
   permissions, and edit/split/reorder published lectures.
