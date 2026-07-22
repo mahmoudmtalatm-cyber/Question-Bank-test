@@ -49,7 +49,11 @@ else is plain HTML/CSS/JavaScript.
     breaks as non-semantic — so a question's stem, choices, or marked
     answer that spans two pages (or an answer-key section that's separated
     from its questions) gets merged into one complete question instead of
-    being truncated or dropped.
+    being truncated or dropped. The prompt includes a worked example of a
+    split question and asks the model to run a self-check pass over its own
+    draft list (looking for questions with <2 options or gaps in the
+    question numbering) before finalizing output, since the plain rule
+    alone wasn't reliably enough to stop this in practice.
   - Freshly extracted/generated questions are validated (question text
     present, 2+ filled options, a valid answer selected) before the initial
     save — the same rule the quiz editor already enforced on every later
