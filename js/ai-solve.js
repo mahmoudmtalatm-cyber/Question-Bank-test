@@ -403,23 +403,10 @@ async function _extractQuestionsFromFile(file, apiKey, onProgress) {
   // single-member "groups" don't stay a real group (nothing to share).
   _cqNormalizeCaseGroups(cleaned);
 
-  // Safety net for cross-page fragmentation: even with strong prompt
-  // instructions, a single extraction pass can still return a question with
-  // only 1 option (its other choices were on a different page than its
-  // stem), or drop a question entirely (its stem had zero options visible
-  // on the page it appeared on, so the first pass never recognized it as
-  // extractable). This targeted second look is deliberately narrow — find
-  // just these specific problems and fix just them — rather than trusting
-  // one pass to get everything right the first time.
-  report(0.55, `Double-checking "${escapeHtml(file.name)}" for questions split across pages…`);
-  const repaired = await _cqRepairFragmentedQuestions(cleaned, file, apiKey, filePart, report);
-
   // Extract embedded images for questions that have them. This step renders
   // PDF pages / crops regions locally in the browser, which needs the raw
   // bytes as base64 regardless of how the file was sent to Gemini above —
   // so it's read here, lazily, only when there's actually an image to pull.
-  // Runs AFTER the repair pass so any newly-recovered questions that turn
-  // out to have images get their images pulled too.
   const imageQuestions = cleaned.filter(q => q.has_image);
   if (imageQuestions.length > 0) {
     report(0.65, `Extracting images from "${escapeHtml(file.name)}" for ${imageQuestions.length} question${imageQuestions.length !== 1 ? 's' : ''}…`);
@@ -427,189 +414,7 @@ async function _extractQuestionsFromFile(file, apiKey, onProgress) {
   }
 
   report(1, `Finished "${escapeHtml(file.name)}"`);
-  return { cleaned, finishReason, repaired };
-}
-
-/* Question numbers embedded in the source's own text, e.g. "14. Which of
-   the following..." or "Q12) ..." — used to spot cross-page fragmentation
-   symptoms: a question with too few options, or a gap in the numbering
-   suggesting a whole question got missed. */
-const CQ_LEADING_NUMBER_RE = /^\s*(?:Q(?:uestion)?\.?\s*)?#?\s*(\d{1,4})\s*[\.\):-]\s*/i;
-
-function _cqDetectFragments(cleaned) {
-  const numbered = [];
-  cleaned.forEach((q, idx) => {
-    // Case-cluster dependents often don't carry the document's main
-    // sequential number (they're phrased as "a.", "i.", or nothing at all
-    // relative to the shared case) — including them here causes false gap
-    // detections, so only the core/standalone questions count for this.
-    if (q.case_group && !q.case_is_core) return;
-    const m = CQ_LEADING_NUMBER_RE.exec(q.question || '');
-    if (m) numbered.push({ idx, num: parseInt(m[1], 10) });
-  });
-  numbered.sort((a, b) => a.num - b.num);
-
-  const lowOptionIdxs = cleaned
-    .map((_, idx) => idx)
-    .filter(idx => Object.keys(cleaned[idx].options || {}).length < 2);
-
-  // Only chase small, plausible gaps (e.g. 13 → 15, missing 14). A larger
-  // jump usually means the source legitimately restarts numbering in a new
-  // section rather than a dropped question, so those are left alone to
-  // avoid false positives (and wasted, fruitless repair requests).
-  const missingNums = [];
-  for (let i = 0; i < numbered.length - 1; i++) {
-    const gap = numbered[i + 1].num - numbered[i].num;
-    if (gap > 1 && gap <= 3) {
-      for (let n = numbered[i].num + 1; n < numbered[i + 1].num; n++) missingNums.push(n);
-    }
-  }
-
-  // Questions whose options are already complete (2+) but which still
-  // have no correct answer recorded — the case where the answer key lived
-  // on a different page/section than the question itself. Not included in
-  // lowOptionIdxs above (which is only about missing OPTIONS), so this
-  // needs its own pass or it's never sent back for a second look.
-  const noKeyIdxs = cleaned
-    .map((_, idx) => idx)
-    .filter(idx => cleaned[idx].no_answer_key
-      && Object.keys(cleaned[idx].options || {}).length >= 2
-      && !lowOptionIdxs.includes(idx));
-
-  return { lowOptionIdxs, missingNums, noKeyIdxs };
-}
-
-/* Sends the source file back to Gemini ONE more time with a narrow job:
-   just these specific items that look broken, go find the missing pieces
-   anywhere in the document. Best-effort — if this call fails for any
-   reason, the original (possibly incomplete) questions are left as-is
-   rather than blowing up the whole extraction over a bonus repair step. */
-async function _cqRepairFragmentedQuestions(cleaned, file, apiKey, filePart, onProgress) {
-  const { lowOptionIdxs, missingNums, noKeyIdxs } = _cqDetectFragments(cleaned);
-  if (!lowOptionIdxs.length && !missingNums.length && !noKeyIdxs.length) return { fixed: 0, added: 0, checked: 0 };
-
-  const totalFlags = lowOptionIdxs.length + missingNums.length + noKeyIdxs.length;
-  if (onProgress) onProgress(0.58, `Found ${totalFlags} possibly split question${totalFlags !== 1 ? 's' : ''} in "${escapeHtml(file.name)}" — re-checking…`);
-
-  let promptText = `The same document is attached again. A first extraction pass produced the questions below, but some look like they may have been split across a page break and lost content. For EACH item below, search the ENTIRE document again (page boundaries mean nothing — the missing content is usually on the very next or previous page, or in a separate answer-key section) and return the complete, corrected question.\n\n`;
-
-  lowOptionIdxs.forEach(idx => {
-    const q = cleaned[idx];
-    const optsStr = Object.entries(q.options).map(([k, v]) => `${k}) ${v}`).join('; ') || '(none found)';
-    promptText += `- ref "inc_${idx}": this question currently has only ${Object.keys(q.options).length} option(s), which is not a valid MCQ — find the REST of its options (and its correct answer, if marked anywhere) for: "${q.question}" — Options found so far: ${optsStr}\n`;
-  });
-  missingNums.forEach(num => {
-    promptText += `- ref "missing_${num}": the document's own question numbering skips from a lower number to a higher one, skipping over question ${num}. If question ${num} genuinely exists in the document, extract it IN FULL (stem, all options, correct answer if marked). If there truly is no question ${num} (e.g. this section's numbering just isn't continuous), omit this ref from your response entirely — do not invent a question.\n`;
-  });
-  noKeyIdxs.forEach(idx => {
-    const q = cleaned[idx];
-    const optsStr = Object.entries(q.options).map(([k, v]) => `${k}) ${v}`).join('; ');
-    promptText += `- ref "nokey_${idx}": this question's options are already complete, but no correct answer was found for it yet: "${q.question}" — Options: ${optsStr}. Look for its answer specifically in a separate answer-key section elsewhere in the document (e.g. a list like "12-C, 13-A..." possibly on a different page, often at the end), matching by this question's number. Return ONLY the "answer" field for these — you do not need to repeat "question"/"options".\n`;
-  });
-
-  promptText += `\nReturn ONLY a JSON array, one object per ref you could actually resolve (skip any you genuinely could not find or confirm), in exactly this format:\n[\n  { "ref": "inc_3", "question": "exact question text", "options": { "A": "exact choice text", "B": "exact choice text" }, "answer": "A", "has_image": false },\n  { "ref": "nokey_7", "answer": "B" }\n]\nThe "answer" must be one of the keys present in "options" (or, for "nokey_" refs, one of that question's already-known option letters), or the exact string "__NO_KEY__" if genuinely no answer is indicated anywhere in the document. Output nothing besides this JSON array — no markdown fences, no commentary.`;
-
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${CQ_MODEL}:generateContent`;
-  let data;
-  try {
-    data = await callGeminiWithRetry(url, {
-      contents: [{ parts: [filePart, { text: promptText }] }],
-      generationConfig: { responseMimeType: 'application/json', temperature: 0, maxOutputTokens: 8192 }
-    }, { pauseCheck: () => cqPauseRequested, cancelToken: cqCancelToken, apiKey });
-  } catch (e) {
-    return { fixed: 0, added: 0, checked: totalFlags, error: e.message || String(e) };
-  }
-
-  const textOut = ((data.candidates || [])[0]?.content?.parts || []).map(p => p.text || '').join('');
-  let parsed;
-  try { parsed = JSON.parse(textOut.replace(/```json|```/g, '').trim()); }
-  catch (e) { return { fixed: 0, added: 0, checked: totalFlags }; }
-  if (!Array.isArray(parsed)) return { fixed: 0, added: 0, checked: totalFlags };
-
-  // Cheap normalization for duplicate detection: lowercase, strip
-  // punctuation/whitespace differences down to a comparable core so a
-  // "missing_N" recovery that actually matches a question already sitting
-  // in the list (a false-positive numbering gap) doesn't get inserted
-  // again as a duplicate.
-  const normalize = (text) => (text || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim().slice(0, 80);
-
-  let fixed = 0, added = 0;
-  parsed.forEach(item => {
-    if (!item || typeof item.ref !== 'string') return;
-
-    if (item.ref.startsWith('nokey_')) {
-      const idx = parseInt(item.ref.slice(6), 10);
-      const q = cleaned[idx];
-      if (!q) return;
-      const rawAnswer = (typeof item.answer === 'string') ? item.answer.trim() : '';
-      if (!rawAnswer || rawAnswer === '__NO_KEY__') return; // still couldn't find it — leave as-is
-      const upper = rawAnswer.toUpperCase();
-      if (q.options[upper]) {
-        q.answer = upper;
-        q.no_answer_key = false;
-        fixed++;
-      }
-      return;
-    }
-
-    if (typeof item.question !== 'string' || !item.options || typeof item.options !== 'object') return;
-    const opts = {};
-    Object.entries(item.options)
-      .filter(([k, v]) => typeof v === 'string' && v.trim() !== '')
-      .sort(([a], [b]) => a.toUpperCase().localeCompare(b.toUpperCase()))
-      .forEach(([k, v]) => { opts[k.toUpperCase()] = v; });
-    if (Object.keys(opts).length < 2) return; // still broken — leave the original alone rather than swap in something equally incomplete
-    const rawAnswer = (typeof item.answer === 'string') ? item.answer.trim() : '';
-    const noKey = rawAnswer === '__NO_KEY__';
-    let answer = noKey ? '' : rawAnswer.toUpperCase();
-    if (!noKey && !opts[answer]) answer = Object.keys(opts)[0];
-    const optionsOrder = Object.entries(opts).map(([key, value]) => ({ key, value }));
-
-    if (item.ref.startsWith('inc_')) {
-      const idx = parseInt(item.ref.slice(4), 10);
-      if (cleaned[idx]) {
-        cleaned[idx].question      = item.question;
-        cleaned[idx].options       = opts;
-        cleaned[idx].optionsOrder  = optionsOrder;
-        cleaned[idx].answer        = answer;
-        cleaned[idx].no_answer_key = noKey;
-        if (typeof item.has_image === 'boolean') cleaned[idx].has_image = item.has_image;
-        fixed++;
-      }
-    } else if (item.ref.startsWith('missing_')) {
-      // Guard against false-positive numbering gaps: if this "recovered"
-      // question's text substantially matches one already in the list
-      // (under a different, or no, detected number), it's not actually
-      // missing — skip it rather than insert a duplicate.
-      const normNew = normalize(item.question);
-      const isDuplicate = normNew && cleaned.some(q => {
-        const normExisting = normalize(q.question);
-        return normExisting && (normExisting === normNew || normExisting.includes(normNew) || normNew.includes(normExisting));
-      });
-      if (isDuplicate) return;
-      cleaned.push({
-        question: item.question, options: opts, optionsOrder, answer,
-        has_image: !!item.has_image, no_answer_key: noKey, _sourceFile: file,
-        case_group: null, case_is_core: false
-      });
-      added++;
-    }
-  });
-
-  // Keep any newly-recovered questions in roughly the right reading-order
-  // position (by their own embedded number) rather than left dangling at
-  // the very end of the list. Array.sort is stable, so anything without a
-  // parseable leading number just keeps its current relative position.
-  if (added > 0) {
-    cleaned.sort((a, b) => {
-      const na = CQ_LEADING_NUMBER_RE.exec(a.question || '');
-      const nb = CQ_LEADING_NUMBER_RE.exec(b.question || '');
-      if (na && nb) return parseInt(na[1], 10) - parseInt(nb[1], 10);
-      return 0;
-    });
-  }
-
-  return { fixed, added, checked: totalFlags };
+  return { cleaned, finishReason };
 }
 
 async function generateQuizFromAI() {
@@ -645,8 +450,6 @@ async function generateQuizFromAI() {
   try {
     let cleaned = [];
     let anyMaxTokens = false;
-    let repairFixedTotal = 0;
-    let repairAddedTotal = 0;
     const totalFiles = cqSelectedFiles.length;
     for (let fi = 0; fi < totalFiles; fi++) {
       // Safe checkpoint — takes effect only if the user clicked Pause, and
@@ -691,10 +494,6 @@ async function generateQuizFromAI() {
       }
       cleaned = cleaned.concat(result.cleaned);
       if (result.finishReason === 'MAX_TOKENS') anyMaxTokens = true;
-      if (result.repaired) {
-        repairFixedTotal += result.repaired.fixed || 0;
-        repairAddedTotal += result.repaired.added || 0;
-      }
     }
 
     if (!cleaned.length) throw new Error('No questions could be detected in the uploaded file(s).');
@@ -751,14 +550,11 @@ async function generateQuizFromAI() {
       ? ` · 🤖 ${aiCount} AI-answered${guessCount > 0 ? ' (⚠️ ' + guessCount + ' from own knowledge)' : ''}`
       : noKeyCount > 0 ? ` · ⚠️ ${noKeyCount} without key` : '';
     const fileNote   = cqSelectedFiles.length > 1 ? ` from ${cqSelectedFiles.length} files` : '';
-    const repairNote = (repairFixedTotal + repairAddedTotal) > 0
-      ? ` · 🔧 ${repairFixedTotal ? repairFixedTotal + ' completed' : ''}${repairFixedTotal && repairAddedTotal ? ' + ' : ''}${repairAddedTotal ? repairAddedTotal + ' recovered' : ''} from split pages`
-      : '';
     const fillNote   = fillResult && fillResult.done > 0
       ? ` · 🧩 ${fillResult.done} question${fillResult.done !== 1 ? 's' : ''} filled to 4 choices` : '';
     const refineNote = refineResult && refineResult.done > 0
       ? ` · 🪄 ${refineResult.done} question${refineResult.done !== 1 ? 's' : ''} refined` : '';
-    statusEl.innerHTML = `<div class="cq-status success">✅ Extracted ${cleaned.length} question${cleaned.length !== 1 ? 's' : ''}${fileNote}${imgNote}${solveNote}${repairNote}${fillNote}${refineNote}. Review below, then save.${warn}</div>`;
+    statusEl.innerHTML = `<div class="cq-status success">✅ Extracted ${cleaned.length} question${cleaned.length !== 1 ? 's' : ''}${fileNote}${imgNote}${solveNote}${fillNote}${refineNote}. Review below, then save.${warn}</div>`;
 
     // Surface any per-question errors from the Fill Choices / Refine passes
     // without blocking the rest of the summary — extraction itself already
@@ -1456,3 +1252,4 @@ async function saveGeneratedCustomQuiz() {
   const statusEl = document.getElementById('cqStatus');
   if (statusEl) statusEl.innerHTML = `<div class="cq-status success">✅ Quiz "${escapeHtml(title)}" saved! Start it from the list above.</div>`;
 }
+
