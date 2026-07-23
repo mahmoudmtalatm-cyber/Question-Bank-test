@@ -348,6 +348,7 @@ async function _extractQuestionsFromFile(file, apiKey, onProgress) {
     }],
     generationConfig: {
       responseMimeType: 'application/json',
+      responseSchema: CQ_RESPONSE_SCHEMA,
       temperature: 0,
       maxOutputTokens: 65536
     }
@@ -356,17 +357,22 @@ async function _extractQuestionsFromFile(file, apiKey, onProgress) {
   const candidate = data && data.candidates && data.candidates[0];
   if (!candidate) throw new Error(`Gemini returned no result for "${file.name}". The file may be unsupported or blocked — try a clearer image or PDF.`);
 
-  const finishReason = candidate.finishReason;
+  let finishReason = candidate.finishReason;
   const textOut = (candidate.content && candidate.content.parts || [])
     .map(p => p.text || '').join('');
   if (!textOut.trim()) throw new Error(`Gemini returned an empty response for "${file.name}". Please try again.`);
 
-  let parsed;
-  try { const cleanOut = textOut.replace(/```json|```/g, '').trim(); parsed = JSON.parse(cleanOut); }
-  catch (e) { throw new Error(`Could not understand the AI response for "${file.name}". Please try again.`); }
+  // parseGeminiJsonArray salvages every complete question already generated
+  // even if the response was cut off mid-array (large document hit
+  // maxOutputTokens) — previously any truncation lost the WHOLE file's
+  // questions, not just the last incomplete one.
+  const { data: parsed, truncated } = parseGeminiJsonArray(textOut);
+  if (truncated) finishReason = 'MAX_TOKENS';
 
   if (!Array.isArray(parsed) || !parsed.length) {
-    throw new Error(`No questions could be detected in "${file.name}".`);
+    throw new Error(truncated
+      ? `Gemini's response for "${file.name}" was cut off before any complete question came through — try splitting this file into smaller sections.`
+      : `No questions could be detected in "${file.name}".`);
   }
 
   report(0.6, `Processing questions from "${escapeHtml(file.name)}"…`);
@@ -449,7 +455,7 @@ async function generateQuizFromAI() {
 
   try {
     let cleaned = [];
-    let anyMaxTokens = false;
+    let truncatedFiles = [];
     const totalFiles = cqSelectedFiles.length;
     for (let fi = 0; fi < totalFiles; fi++) {
       // Safe checkpoint — takes effect only if the user clicked Pause, and
@@ -493,7 +499,7 @@ async function generateQuizFromAI() {
         }
       }
       cleaned = cleaned.concat(result.cleaned);
-      if (result.finishReason === 'MAX_TOKENS') anyMaxTokens = true;
+      if (result.finishReason === 'MAX_TOKENS') truncatedFiles.push(file.name);
     }
 
     if (!cleaned.length) throw new Error('No questions could be detected in the uploaded file(s).');
@@ -535,8 +541,9 @@ async function generateQuizFromAI() {
     }
 
     let warn = '';
-    if (anyMaxTokens) {
-      warn = ` ⚠️ One of the responses may have been cut off because the document is very large — please check below that the last question is complete, and split very long documents into smaller files if needed.`;
+    if (truncatedFiles.length) {
+      const fileList = truncatedFiles.map(n => `"${escapeHtml(n)}"`).join(', ');
+      warn = ` ⚠️ ${truncatedFiles.length > 1 ? 'These files\' responses were' : 'This file\'s response was'} cut off because the document is very large: ${fileList}. Every complete question up to that point was still recovered, but check below that nothing near the end is missing, and split very long documents into smaller files if needed.`;
     }
 
     const imgCount    = cleaned.filter(q => q.image).length;
@@ -678,6 +685,7 @@ async function _generateQuestionsFromLectureFile(file, generationPrompt, apiKey,
       }],
       generationConfig: {
         responseMimeType: 'application/json',
+        responseSchema: CQ_RESPONSE_SCHEMA,
         temperature: 0.7,
         maxOutputTokens: 65536
       }
@@ -698,6 +706,7 @@ async function _generateQuestionsFromLectureFile(file, generationPrompt, apiKey,
       }],
       generationConfig: {
         responseMimeType: 'application/json',
+        responseSchema: CQ_RESPONSE_SCHEMA,
         temperature: 0.7,
         maxOutputTokens: 65536
       }
@@ -710,19 +719,21 @@ async function _generateQuestionsFromLectureFile(file, generationPrompt, apiKey,
   const candidate = data && data.candidates && data.candidates[0];
   if (!candidate) throw new Error(`Gemini returned no result for "${file.name}". The file may be unsupported or too large — try splitting it into smaller sections.`);
 
-  const finishReason = candidate.finishReason;
+  let finishReason = candidate.finishReason;
   const textOut = (candidate.content && candidate.content.parts || [])
     .map(p => p.text || '').join('');
   if (!textOut.trim()) throw new Error(`Gemini returned an empty response for "${file.name}". Please try again.`);
 
-  let parsed;
-  try {
-    const clean = textOut.replace(/```json|```/g, '').trim();
-    parsed = JSON.parse(clean);
-  } catch (e) { throw new Error(`Could not understand the AI response for "${file.name}". Please try again.`); }
+  // See matching comment in _extractQuestionsFromFile — salvages whatever
+  // complete questions came through before a truncated response, instead of
+  // discarding all of them.
+  const { data: parsed, truncated } = parseGeminiJsonArray(textOut);
+  if (truncated) finishReason = 'MAX_TOKENS';
 
   if (!Array.isArray(parsed) || !parsed.length) {
-    throw new Error(`No questions were generated from "${file.name}". Try uploading a more detailed lecture or reducing the question count.`);
+    throw new Error(truncated
+      ? `Gemini's response for "${file.name}" was cut off before any complete question came through — try reducing the question count or splitting the lecture into smaller sections.`
+      : `No questions were generated from "${file.name}". Try uploading a more detailed lecture or reducing the question count.`);
   }
 
   report(0.75, `Processing questions from "${escapeHtml(file.name)}"…`);
@@ -788,7 +799,7 @@ async function generateQuizFromLecture() {
     const generationPrompt = buildGenerationPrompt(qCount, prompt);
 
     let cleaned = [];
-    let anyMaxTokens = false;
+    let truncatedFiles = [];
     const totalFiles = cqLectureFiles.length;
     for (let fi = 0; fi < totalFiles; fi++) {
       // Safe checkpoint — takes effect only if the user clicked Pause, and
@@ -831,7 +842,7 @@ async function generateQuizFromLecture() {
         }
       }
       cleaned = cleaned.concat(result.cleaned);
-      if (result.finishReason === 'MAX_TOKENS') anyMaxTokens = true;
+      if (result.finishReason === 'MAX_TOKENS') truncatedFiles.push(file.name);
     }
 
     if (!cleaned.length) throw new Error('No questions were generated. Try uploading a more detailed lecture or reducing the question count.');
@@ -840,8 +851,9 @@ async function generateQuizFromLecture() {
     _markQuestionEditDirty(); // freshly generated content is unsaved — warn before it's closed away
 
     let warn = '';
-    if (anyMaxTokens) {
-      warn = ` ⚠️ One of the responses may have been cut off — try splitting very long documents into smaller files.`;
+    if (truncatedFiles.length) {
+      const fileList = truncatedFiles.map(n => `"${escapeHtml(n)}"`).join(', ');
+      warn = ` ⚠️ ${truncatedFiles.length > 1 ? 'These files\' responses were' : 'This file\'s response was'} cut off because the document is very large: ${fileList}. Every complete question up to that point was still recovered, but try splitting very long documents into smaller files for a full set.`;
     }
 
     const clinicalCount = cleaned.filter(q =>

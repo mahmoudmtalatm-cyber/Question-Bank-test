@@ -12,6 +12,81 @@
 const GEMINI_MAX_FILE_BYTES         = 2 * 1024 * 1024 * 1024; // Gemini Files API hard limit, per file (free tier included)
 const GEMINI_INLINE_THRESHOLD_BYTES = 15 * 1024 * 1024;       // stay safely under Gemini's ~20MB inline request cap once base64 (~33%) overhead is added
 
+/* Parses a JSON array returned by Gemini, and — if generation was cut off
+   partway through (hit maxOutputTokens, so the JSON is syntactically
+   incomplete) — salvages every fully-formed element instead of discarding
+   the whole response. Without this, one truncated response used to throw
+   away ALL items already generated (a whole file's worth of questions, or
+   every choice already written), not just the one that got cut off.
+
+   Returns { data, truncated }:
+     - data:      the parsed array (possibly shorter than what the model
+                   intended to return), or null if nothing usable was found.
+     - truncated: true if repair kicked in, so callers can flag the result
+                   as MAX_TOKENS-affected even when the API's own
+                   `finishReason` was missing/wrong.
+
+   Repair strategy: walk the raw text tracking string/escape state and
+   bracket depth so we only ever cut at a genuine top-level array-element
+   boundary — either a '}' that closes an object element back to depth 1,
+   or the closing quote of a bare top-level string element (for arrays of
+   strings, e.g. {"choices": [...]}'s inner array) — never inside an
+   element's own text, which may itself contain literal '}",' sequences. */
+function parseGeminiJsonArray(text) {
+  const clean = (text || '').replace(/```json|```/g, '').trim();
+  try {
+    const data = JSON.parse(clean);
+    return { data, truncated: false };
+  } catch (_) { /* fall through to repair */ }
+
+  if (!clean.startsWith('[')) return { data: null, truncated: false };
+
+  let depth = 0, inString = false, escaped = false, lastElementEnd = -1;
+  for (let i = 0; i < clean.length; i++) {
+    const ch = clean[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === '\\') escaped = true;
+      else if (ch === '"') {
+        inString = false;
+        if (depth === 1) lastElementEnd = i; // closed a bare top-level string element
+      }
+      continue;
+    }
+    if (ch === '"') { inString = true; continue; }
+    if (ch === '{' || ch === '[') depth++;
+    else if (ch === '}' || ch === ']') {
+      depth--;
+      if (depth === 1 && ch === '}') lastElementEnd = i; // closed a top-level object element
+    }
+  }
+  if (lastElementEnd === -1) return { data: null, truncated: true };
+
+  try {
+    const data = JSON.parse(clean.slice(0, lastElementEnd + 1) + ']');
+    return { data, truncated: true };
+  } catch (_) {
+    return { data: null, truncated: true };
+  }
+}
+
+/* Same salvage idea as parseGeminiJsonArray, but for a small JSON OBJECT
+   whose one array-valued field got cut off mid-generation — e.g.
+   {"choices": ["...", "...", "..."]} from the distractor-writing tools,
+   where a small maxOutputTokens budget occasionally isn't quite enough.
+   Finds `"<fieldName>":` then locates that field's own '[' ... and runs it
+   through the same bracket/string-aware repair used above.
+
+   Returns { data, truncated } where `data` is the recovered array (or null
+   if nothing after the field name was complete). */
+function parseGeminiJsonObjectArrayField(text, fieldName) {
+  const clean = (text || '').replace(/```json|```/g, '').trim();
+  const keyMatch = clean.match(new RegExp(`"${fieldName}"\\s*:\\s*\\[`));
+  if (!keyMatch) return { data: null, truncated: true };
+  const arrayText = clean.slice(keyMatch.index + keyMatch[0].length - 1); // from the '[' onward
+  return parseGeminiJsonArray(arrayText);
+}
+
 function formatBytes(bytes) {
   if (bytes >= 1024 * 1024 * 1024) return (bytes / (1024 * 1024 * 1024)).toFixed(2) + 'GB';
   if (bytes >= 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + 'MB';
@@ -669,19 +744,13 @@ async function cqAiSolveQuestions(questions, targetIdxs, sourceText, sourceFiles
       const textOut = ((data.candidates || [])[0]?.content?.parts || []).map(p => p.text || '').join('');
       const cleanText = textOut.replace(/```json|```/g, '').trim();
 
-      let answers;
-      try {
-        answers = JSON.parse(cleanText);
-      } catch (parseErr) {
-        // Try to salvage partial JSON by finding the last complete object
-        const lastBrace = cleanText.lastIndexOf('},');
-        if (lastBrace !== -1) {
-          try { answers = JSON.parse(cleanText.substring(0, lastBrace + 1) + ']'); } catch (_) {}
-        }
-        if (!answers) {
-          errors.push(`Batch ${ci + 1}: Could not parse AI response (response may have been truncated).`);
-          continue;
-        }
+      const { data: answers, truncated } = parseGeminiJsonArray(cleanText);
+      if (!answers) {
+        errors.push(`Batch ${ci + 1}: Could not parse AI response (response may have been truncated).`);
+        continue;
+      }
+      if (truncated) {
+        errors.push(`Batch ${ci + 1}: response was cut off partway through — recovered ${answers.length} answer${answers.length !== 1 ? 's' : ''} from it; the rest of this batch may need re-running.`);
       }
 
       if (Array.isArray(answers)) {

@@ -142,10 +142,19 @@ function _aiRefineInstrCaretLabel(editorKey, i) {
   return draft ? '⚙️ Instructions •' : '⚙️ Instructions';
 }
 /* Strips ```json fences (Gemini sometimes adds them despite the mime type
-   request) before parsing — same tolerant pattern used elsewhere in the app. */
+   request) before parsing — same tolerant pattern used elsewhere in the app.
+   On a malformed/truncated response (occasionally the model's output gets
+   cut off before finishing, even within these tools' own small token
+   budget), this throws a clear, actionable error instead of letting a raw
+   native SyntaxError like "Unterminated string in JSON at position 117"
+   reach the user. */
 function _aiToolsParseJSON(text) {
   const clean = (text || '').replace(/```json|```/g, '').trim();
-  return JSON.parse(clean);
+  try {
+    return JSON.parse(clean);
+  } catch (e) {
+    throw new Error('The AI response was cut off or malformed — please try again.');
+  }
 }
 
 /* Builds the "shared case" context that AI Solve/Explain/Chat already use
@@ -286,7 +295,17 @@ Respond ONLY with a JSON object: {"question": "the refined question text"}. No m
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${AI_TOOLS_MODEL}:generateContent`;
   const data = await callGeminiWithRetry(url, {
     contents: [{ parts }],
-    generationConfig: { responseMimeType: 'application/json', temperature: 0.4, maxOutputTokens: 1024 }
+    generationConfig: {
+      responseMimeType: 'application/json', temperature: 0.4, maxOutputTokens: 2048,
+      // Gemini 2.5 Flash reasons by default, and those "thinking" tokens are
+      // drawn from the SAME maxOutputTokens budget as the visible JSON
+      // answer. For a short, deterministic rewrite like this, that reasoning
+      // pass isn't needed — and left dynamic, it could unpredictably eat
+      // most of the budget, leaving too little for the actual answer and
+      // truncating it mid-string. Disabling it reclaims the whole budget for
+      // the real output and is also faster.
+      thinkingConfig: { thinkingBudget: 0 }
+    }
   }, { cancelToken: token, apiKey });
   const textOut = ((data.candidates || [])[0]?.content?.parts || []).map(p => p.text || '').join('');
   const parsed = _aiToolsParseJSON(textOut);
@@ -368,11 +387,31 @@ Respond ONLY with a JSON object: {"choices": [${Array(count).fill('"..."').join(
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${AI_TOOLS_MODEL}:generateContent`;
   const data = await callGeminiWithRetry(url, {
     contents: [{ parts }],
-    generationConfig: { responseMimeType: 'application/json', temperature: 0.7, maxOutputTokens: 1024 }
+    generationConfig: {
+      responseMimeType: 'application/json', temperature: 0.7, maxOutputTokens: 2048,
+      // See matching comment in aiRefineQuestion — writing a few distractor
+      // choices doesn't need Gemini 2.5 Flash's default reasoning pass, and
+      // disabling it frees the full token budget for the actual answer
+      // instead of risking it being squeezed out and truncated.
+      thinkingConfig: { thinkingBudget: 0 }
+    }
   }, { cancelToken: token, apiKey });
   const textOut = ((data.candidates || [])[0]?.content?.parts || []).map(p => p.text || '').join('');
-  const parsed = _aiToolsParseJSON(textOut);
-  let choices = (parsed && Array.isArray(parsed.choices)) ? parsed.choices.filter(c => typeof c === 'string' && c.trim()) : [];
+
+  let choicesRaw;
+  try {
+    choicesRaw = _aiToolsParseJSON(textOut).choices;
+  } catch (e) {
+    // Response got cut off mid-generation — salvage whichever choices were
+    // already fully written instead of failing the whole request over a
+    // trailing partial one (relevant when count > 1, e.g. Fill Choices
+    // asking for several distractors at once).
+    const salvage = parseGeminiJsonObjectArrayField(textOut, 'choices');
+    if (!salvage.data || !salvage.data.length) throw e;
+    choicesRaw = salvage.data;
+  }
+
+  let choices = Array.isArray(choicesRaw) ? choicesRaw.filter(c => typeof c === 'string' && c.trim()) : [];
   if (!choices.length) throw new Error('AI did not return usable choices.');
   while (choices.length < count) choices.push('');
   return choices.slice(0, count);
