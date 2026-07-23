@@ -43,46 +43,12 @@ else is plain HTML/CSS/JavaScript.
     requests/minute per project) even when several bulk tools are running
     at once across different editors. If your key is on a paid tier with
     a much higher limit, that constant can be safely lowered.
-  - Extraction sends the whole source PDF to Gemini in a single request
-    (not split page-by-page), and the extraction prompt (`CQ_EXTRACTION_PROMPT`
-    in `gemini-uploads.js`) explicitly instructs the model to treat page
-    breaks as non-semantic — so a question's stem, choices, or marked
-    answer that spans two pages (or an answer-key section that's separated
-    from its questions) gets merged into one complete question instead of
-    being truncated or dropped. This explicitly covers both a partial split
-    (some choices continue on the next page) and a total split (the stem
-    ends a page with zero options, and the entire options list is an
-    "orphan" block at the top of the next page with no stem of its own).
-    The prompt includes worked examples of both and asks the model to
-    self-check before finalizing output — but since prompt instructions
-    alone can't be 100% reliable, there's also a code-level safety net:
-    after each file's extraction, `_cqDetectFragments` (`ai-solve.js`) scans
-    the results for (a) questions with fewer than 2 options, (b) questions
-    whose options are complete but whose answer key is still missing (the
-    "answer was on the next page" case), and (c) gaps in the document's own
-    question numbering (e.g. 13, 15 present but 14 missing — usually a
-    page-split casualty; case-cluster dependents are excluded from this
-    check since their numbering often doesn't follow the main sequence).
-    `_cqRepairFragmentedQuestions` then sends the source file back to
-    Gemini ONE more time with a narrow, targeted job — just find and
-    complete those specific flagged items — and merges the fixes (or
-    newly-recovered questions) back in. A text-similarity check guards
-    against a "recovered" question actually being a duplicate of one
-    already in the list (a false-positive numbering-gap match), so a
-    falsely-detected gap doesn't inflate the question count. This second
-    pass is best-effort: if it fails or can't resolve an item, the original
-    extraction result is left untouched rather than the whole run failing.
-    The review screen's success message shows how many questions this pass
-    fixed or recovered (🔧 note).
-  - Freshly extracted/generated questions are validated (question text
-    present, 2+ filled options, a valid answer selected) before the initial
-    save — the same rule the quiz editor already enforced on every later
-    edit (`saveGeneratedCustomQuiz` in `ai-solve.js`, matching
-    `saveCustomQuizEdits` in `quiz-editor.js`). Previously a question could
-    slip through extraction with only one option and save without
-    complaint, only to force you to add a second option the next time you
-    opened it for editing; now that's caught immediately on the review
-    screen, right after extraction, while it's easy to fix.
+  - The whole uploaded PDF/image is always sent to Gemini in a single
+    request (never split page-by-page), and the extraction prompt
+    (`CQ_EXTRACTION_PROMPT` in `gemini-uploads.js`) explicitly tells the
+    model to treat the document as one continuous flow — so a question
+    whose stem, answer choices, or answer key spans a page break gets
+    merged correctly instead of being truncated or dropped.
 - **Admin panel** — publish quizzes into the official bank, manage the
   curriculum tree (years/modules/subjects), manage other admins and their
   permissions, and edit/split/reorder published lectures.
