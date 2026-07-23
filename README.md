@@ -43,15 +43,30 @@ else is plain HTML/CSS/JavaScript.
     requests/minute per project) even when several bulk tools are running
     at once across different editors. If your key is on a paid tier with
     a much higher limit, that constant can be safely lowered.
-  - The whole uploaded PDF/image is always sent to Gemini in a single
-    request (never split page-by-page), and the extraction prompt
-    (`CQ_EXTRACTION_PROMPT` in `gemini-uploads.js`) explicitly tells the
-    model to treat the document as one continuous flow — so a question
-    whose stem, answer choices, or answer key spans a page break gets
-    merged correctly instead of being truncated or dropped. The prompt
-    also expects pages to mix portrait and landscape orientation (or be
-    entirely one or the other) — a PDF doesn't need to be pre-formatted
-    into a single uniform orientation for extraction to work correctly.
+  - For PDFs, every page is rendered locally (via `pdf.js`, already used
+    elsewhere in the app for image cropping) into its own image and sent to
+    Gemini as a separate part preceded by an explicit "--- PAGE i of N ---"
+    marker (`buildGeminiPdfPageParts` in `gemini-uploads.js`), instead of
+    sending the whole PDF as one opaque blob. Combined with the extraction
+    prompt's instruction to treat the document as one continuous flow using
+    those markers as the definitive page boundaries (`CQ_EXTRACTION_PROMPT`
+    rule 8), a question whose stem, answer choices, or answer key spans a
+    page break is merged correctly instead of being truncated or dropped.
+    Documents over 120 pages (`MAX_PDF_PAGES_FOR_PER_PAGE_RENDER`) fall back
+    to sending the whole file as one part, as does any PDF pdf.js can't
+    parse — extraction still works either way, just without the extra
+    explicit per-page markers. The prompt also expects pages to mix portrait
+    and landscape orientation (or be entirely one or the other) — a PDF
+    doesn't need to be pre-formatted into a single uniform orientation.
+  - Extraction and lecture-based question generation both request
+    schema-constrained JSON output (`CQ_RESPONSE_SCHEMA` in
+    `gemini-uploads.js`) for more reliable formatting. On very large
+    documents, if Gemini's response still gets cut off mid-generation
+    (hitting the model's output-length limit), the app recovers every
+    question that was already fully generated before the cutoff instead
+    of discarding the whole file's results (`_parseQuestionArrayResponse`
+    in `gemini-uploads.js`) — you'll see a warning naming the affected
+    file so you know to split it into smaller sections for a complete set.
 - **Admin panel** — publish quizzes into the official bank, manage the
   curriculum tree (years/modules/subjects), manage other admins and their
   permissions, and edit/split/reorder published lectures.

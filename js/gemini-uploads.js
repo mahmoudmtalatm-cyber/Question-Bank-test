@@ -104,7 +104,7 @@ STRICT RULES — follow exactly, no exceptions:
 5. If a specific question has NO indicated correct answer anywhere in the document, set its "answer" to the special value "__NO_KEY__". Do NOT guess or infer an answer — use "__NO_KEY__" exactly.
 6. Do not invent, add, duplicate, or remove any questions or options that are not present in the source document.
 7. For each question, set "has_image" to true if THIS SPECIFIC question is accompanied by an image, diagram, figure, table, chart, graph, X-ray, CT scan, ECG, histology slide, or any other visual element that is part of it. Set it to false otherwise.
-8. MULTI-PAGE DOCUMENTS — treat every page as one single continuous document, never as isolated, independent pages. A page break is just a print/layout artifact and is NEVER a reason to end, truncate, or drop a question:
+8. MULTI-PAGE DOCUMENTS — treat every page as one single continuous document, never as isolated, independent pages. A page break is just a print/layout artifact and is NEVER a reason to end, truncate, or drop a question. If the document was provided to you as a series of separate images each preceded by a "--- PAGE i of N ---" marker, treat consecutive markers as directly adjacent pages with nothing missing between them — the marker before an image tells you exactly which page it is, so use that to know precisely where you are as you check for continuations, not just an approximate sense of "earlier" vs "later" in the document:
    - A question's stem may end at the bottom of one page and continue at the top of the next. A question's answer choices — or even just its LAST one or two choices — may be pushed onto the following page by page layout, while the stem and earlier choices stay on the page before it. The answer key for a question (or a whole batch of questions) is often printed pages later, in a separate "Answers"/"Key" section at the end of the document.
    - Before finalizing ANY question, actively check the page(s) immediately after wherever that question started for: the rest of its stem, any remaining answer choices, an image/figure it refers to, and its correct-answer marking. Merge everything you find into that ONE question's fields exactly as if it had all appeared on a single page — never output a question with a truncated stem or fewer choices than it actually has just because the rest was on a different page, and never silently drop a question just because you couldn't find all of its choices or its answer on the SAME page as its stem.
    - This applies symmetrically at page starts too: text at the very top of a page with no question number or stem of its own is very likely the tail end (remaining choices, or an answer key entry) of the last question from the previous page, not something to discard or treat as a new fragment.
@@ -154,6 +154,41 @@ const CQ_RESPONSE_SCHEMA = {
     required: ['question', 'options', 'answer']
   }
 };
+
+/* Parses a question-array JSON response, recovering as much as possible if
+   the model's output got cut off mid-generation (most commonly by hitting
+   maxOutputTokens on a very large document) instead of discarding every
+   already-generated question just because the array never got a chance to
+   close properly. This is the #1 cause of "some questions/choices are
+   missing" on large PDFs: a hard JSON.parse would previously throw on the
+   whole response and lose everything, even questions that were already
+   complete and correct before the cutoff point.
+
+   Strategy: try a normal parse first (the common, non-truncated case costs
+   nothing extra). If that fails, walk backward from the end of the text
+   looking for the last `}` that closes a complete top-level array element,
+   truncate there, close the array with `]`, and try again — repeating with
+   progressively earlier candidates until something parses. This can only
+   ever recover a *prefix* of complete objects; it never fabricates data.
+   Returns { parsed, wasTruncated } — `parsed` is null if nothing at all
+   could be recovered. */
+function _parseQuestionArrayResponse(text) {
+  try {
+    return { parsed: JSON.parse(text), wasTruncated: false };
+  } catch (e) { /* fall through to repair below */ }
+
+  const candidates = [];
+  for (let i = text.length - 1; i >= 0 && candidates.length < 500; i--) {
+    if (text[i] === '}') candidates.push(i);
+  }
+  for (const idx of candidates) {
+    try {
+      const parsed = JSON.parse(text.slice(0, idx + 1) + ']');
+      if (Array.isArray(parsed) && parsed.length) return { parsed, wasTruncated: true };
+    } catch (e) { /* keep trying earlier candidates */ }
+  }
+  return { parsed: null, wasTruncated: false };
+}
 
 /* ── Shared request pacing (prevents hitting Gemini's free-tier RPM cap) ──
    Google's free tier caps Gemini 2.5 Flash at roughly 10–15 requests per
@@ -323,9 +358,10 @@ function loadImageFromDataUrl(dataUrl) {
   });
 }
 
-/* ── Render a single PDF page to a canvas using pdf.js, return dataURL ── */
-async function renderPdfPageToDataUrl(base64Data, pageNum) {
-  // Lazy-load pdf.js from CDN
+/* ── Lazy-load pdf.js (once) and parse a base64 PDF into a pdf.js document.
+   Shared by renderPdfPageToDataUrl and buildGeminiPdfPageParts so a PDF is
+   never parsed more than once per operation. ── */
+async function _loadPdfDocument(base64Data) {
   if (!window.pdfjsLib) {
     await new Promise((resolve, reject) => {
       const script = document.createElement('script');
@@ -337,11 +373,61 @@ async function renderPdfPageToDataUrl(base64Data, pageNum) {
     window.pdfjsLib.GlobalWorkerOptions.workerSrc =
       'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
   }
-  const pdfLib = window.pdfjsLib;
   const binary = atob(base64Data);
   const bytes  = new Uint8Array(binary.length);
   for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-  const pdf  = await pdfLib.getDocument({ data: bytes }).promise;
+  return window.pdfjsLib.getDocument({ data: bytes }).promise;
+}
+
+const MAX_PDF_PAGES_FOR_PER_PAGE_RENDER = 120; // sane cap so extremely long PDFs don't stall the browser rendering every page locally
+
+/* Renders every page of a PDF locally into its own image and returns Gemini
+   request parts with an explicit "--- PAGE i of N ---" text marker before
+   each page's image, instead of sending the whole PDF as one opaque blob.
+
+   This is what actually makes cross-page continuity reliable: a question
+   whose stem, choices, or answer key spans a page break is far easier for
+   the model to catch when it has to work page markers into its own reading
+   rather than silently inferring page boundaries inside a single PDF blob it
+   never has to explicitly account for. CQ_EXTRACTION_PROMPT's rule 8 tells
+   the model to actively use these markers when they're present.
+
+   Returns { parts, numPages }, or null if this isn't possible/worthwhile —
+   e.g. pdf.js fails to load or parse the file, or the document has more
+   pages than MAX_PDF_PAGES_FOR_PER_PAGE_RENDER (rendering that many full
+   page images locally would be slow and needlessly token-heavy). Callers
+   must fall back to buildGeminiFilePart (sending the whole file as one
+   part) when this returns null — extraction still works either way, just
+   without the extra explicit per-page markers. */
+async function buildGeminiPdfPageParts(file, onPageProgress) {
+  try {
+    const base64 = await fileToBase64(file);
+    const pdf = await _loadPdfDocument(base64);
+    const numPages = pdf.numPages;
+    if (!numPages || numPages > MAX_PDF_PAGES_FOR_PER_PAGE_RENDER) return null;
+
+    const parts = [];
+    for (let i = 1; i <= numPages; i++) {
+      if (onPageProgress) onPageProgress(i, numPages);
+      const page = await pdf.getPage(i);
+      const viewport = page.getViewport({ scale: 2 });
+      const canvas = document.createElement('canvas');
+      canvas.width  = viewport.width;
+      canvas.height = viewport.height;
+      await page.render({ canvasContext: canvas.getContext('2d'), viewport }).promise;
+      const pageBase64 = canvas.toDataURL('image/png').split(',')[1] || '';
+      parts.push({ text: `--- PAGE ${i} of ${numPages} ---` });
+      parts.push({ inline_data: { mime_type: 'image/png', data: pageBase64 } });
+    }
+    return { parts, numPages };
+  } catch (e) {
+    return null; // caller falls back to buildGeminiFilePart
+  }
+}
+
+/* ── Render a single PDF page to a canvas using pdf.js, return dataURL ── */
+async function renderPdfPageToDataUrl(base64Data, pageNum) {
+  const pdf  = await _loadPdfDocument(base64Data);
   const page = await pdf.getPage(pageNum);
   const scale    = 2;
   const viewport = page.getViewport({ scale });

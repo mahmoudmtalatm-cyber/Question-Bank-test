@@ -332,22 +332,45 @@ async function _extractQuestionsFromFile(file, apiKey, onProgress) {
 
   const mimeType = file.type ||
     (file.name.toLowerCase().endsWith('.pdf') ? 'application/pdf' : 'image/jpeg');
+  const isPdf = mimeType === 'application/pdf';
 
   report(0, `Reading "${escapeHtml(file.name)}"…`);
-  const filePart = await buildGeminiFilePart(file, apiKey, mimeType);
+
+  // For PDFs, render every page as its own explicitly page-numbered image
+  // instead of sending the whole document as one opaque blob — this gives
+  // the model concrete, unambiguous page boundaries to check against when
+  // looking for a question whose stem/choices/answer key spans a page break
+  // (see CQ_EXTRACTION_PROMPT rule 8), instead of relying on it to correctly
+  // infer page breaks on its own from inside a single PDF blob. Falls back
+  // to the whole-file part below when this isn't possible (an unusually
+  // long document, or pdf.js failing to load/parse the file) — extraction
+  // still works either way, just without the extra explicit page markers.
+  let filePart = null;
+  let pageParts = null;
+  if (isPdf) {
+    pageParts = await buildGeminiPdfPageParts(file, (i, n) => {
+      report(0.05 + (i / n) * 0.35, `Reading page ${i} of ${n} of "${escapeHtml(file.name)}"…`);
+    });
+  }
+  if (!pageParts) {
+    filePart = await buildGeminiFilePart(file, apiKey, mimeType);
+  }
 
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${CQ_MODEL}:generateContent`;
 
-  report(0.1, `Extracting questions from "${escapeHtml(file.name)}"…`);
+  report(0.45, `Extracting questions from "${escapeHtml(file.name)}"…`);
+  const promptText = pageParts
+    ? `This document has ${pageParts.numPages} pages, each provided below as its own image immediately preceded by a "--- PAGE i of ${pageParts.numPages} ---" marker. Use these markers as the definitive page boundaries when applying the rules below.\n\n${CQ_EXTRACTION_PROMPT}`
+    : CQ_EXTRACTION_PROMPT;
+  const contentParts = pageParts
+    ? [...pageParts.parts, { text: promptText }]
+    : [filePart, { text: promptText }];
+
   const data = await callGeminiWithRetry(url, {
-    contents: [{
-      parts: [
-        filePart,
-        { text: CQ_EXTRACTION_PROMPT }
-      ]
-    }],
+    contents: [{ parts: contentParts }],
     generationConfig: {
       responseMimeType: 'application/json',
+      responseSchema: CQ_RESPONSE_SCHEMA,
       temperature: 0,
       maxOutputTokens: 65536
     }
@@ -361,9 +384,13 @@ async function _extractQuestionsFromFile(file, apiKey, onProgress) {
     .map(p => p.text || '').join('');
   if (!textOut.trim()) throw new Error(`Gemini returned an empty response for "${file.name}". Please try again.`);
 
-  let parsed;
-  try { const cleanOut = textOut.replace(/```json|```/g, '').trim(); parsed = JSON.parse(cleanOut); }
-  catch (e) { throw new Error(`Could not understand the AI response for "${file.name}". Please try again.`); }
+  // If the response got cut off mid-generation (usually maxOutputTokens on a
+  // very large document), recover as many complete questions as possible
+  // instead of losing the whole file's worth of work — see
+  // _parseQuestionArrayResponse in gemini-uploads.js for how.
+  const cleanOut = textOut.replace(/```json|```/g, '').trim();
+  const { parsed, wasTruncated } = _parseQuestionArrayResponse(cleanOut);
+  if (!parsed) throw new Error(`Could not understand the AI response for "${file.name}". Please try again.`);
 
   if (!Array.isArray(parsed) || !parsed.length) {
     throw new Error(`No questions could be detected in "${file.name}".`);
@@ -414,7 +441,7 @@ async function _extractQuestionsFromFile(file, apiKey, onProgress) {
   }
 
   report(1, `Finished "${escapeHtml(file.name)}"`);
-  return { cleaned, finishReason };
+  return { cleaned, finishReason, wasTruncated };
 }
 
 async function generateQuizFromAI() {
@@ -449,7 +476,7 @@ async function generateQuizFromAI() {
 
   try {
     let cleaned = [];
-    let anyMaxTokens = false;
+    const truncatedFiles = []; // names of files whose response was cut off / had to be repaired
     const totalFiles = cqSelectedFiles.length;
     for (let fi = 0; fi < totalFiles; fi++) {
       // Safe checkpoint — takes effect only if the user clicked Pause, and
@@ -493,7 +520,7 @@ async function generateQuizFromAI() {
         }
       }
       cleaned = cleaned.concat(result.cleaned);
-      if (result.finishReason === 'MAX_TOKENS') anyMaxTokens = true;
+      if (result.finishReason === 'MAX_TOKENS' || result.wasTruncated) truncatedFiles.push(file.name);
     }
 
     if (!cleaned.length) throw new Error('No questions could be detected in the uploaded file(s).');
@@ -535,8 +562,9 @@ async function generateQuizFromAI() {
     }
 
     let warn = '';
-    if (anyMaxTokens) {
-      warn = ` ⚠️ One of the responses may have been cut off because the document is very large — please check below that the last question is complete, and split very long documents into smaller files if needed.`;
+    if (truncatedFiles.length) {
+      const names = truncatedFiles.map(n => `"${escapeHtml(n)}"`).join(', ');
+      warn = ` ⚠️ The response for ${names} was cut off partway through because the document is very large — everything extracted before the cutoff is kept, but some questions/choices near the end are likely missing. Split large documents into smaller files (e.g. by chapter/section) for complete extraction.`;
     }
 
     const imgCount    = cleaned.filter(q => q.image).length;
@@ -678,6 +706,7 @@ async function _generateQuestionsFromLectureFile(file, generationPrompt, apiKey,
       }],
       generationConfig: {
         responseMimeType: 'application/json',
+        responseSchema: CQ_RESPONSE_SCHEMA,
         temperature: 0.7,
         maxOutputTokens: 65536
       }
@@ -688,16 +717,31 @@ async function _generateQuestionsFromLectureFile(file, generationPrompt, apiKey,
     const mimeType = file.type ||
       (file.name.toLowerCase().endsWith('.pdf') ? 'application/pdf' :
        isTxt ? 'text/plain' : 'image/jpeg');
-    const filePart = await buildGeminiFilePart(file, apiKey, mimeType);
+    const isPdf = mimeType === 'application/pdf';
+
+    // Same per-page rendering as extraction (see _extractQuestionsFromFile)
+    // — gives the model explicit page markers instead of one opaque PDF
+    // blob, so lecture content that spans a page break isn't misread as
+    // two disconnected fragments. Falls back to the whole-file part when
+    // this isn't possible.
+    let pageParts = null;
+    if (isPdf) {
+      pageParts = await buildGeminiPdfPageParts(file, (i, n) => {
+        report(0.05 + (i / n) * 0.05, `Reading page ${i} of ${n} of "${escapeHtml(file.name)}"…`);
+      });
+    }
+    const promptText = pageParts
+      ? `This document has ${pageParts.numPages} pages, each provided below as its own image immediately preceded by a "--- PAGE i of ${pageParts.numPages} ---" marker — treat it as one continuous document using those markers as the page boundaries.\n\n${generationPrompt}`
+      : generationPrompt;
+    const contentParts = pageParts
+      ? [...pageParts.parts, { text: promptText }]
+      : [await buildGeminiFilePart(file, apiKey, mimeType), { text: promptText }];
+
     requestBody = {
-      contents: [{
-        parts: [
-          filePart,
-          { text: generationPrompt }
-        ]
-      }],
+      contents: [{ parts: contentParts }],
       generationConfig: {
         responseMimeType: 'application/json',
+        responseSchema: CQ_RESPONSE_SCHEMA,
         temperature: 0.7,
         maxOutputTokens: 65536
       }
@@ -715,11 +759,13 @@ async function _generateQuestionsFromLectureFile(file, generationPrompt, apiKey,
     .map(p => p.text || '').join('');
   if (!textOut.trim()) throw new Error(`Gemini returned an empty response for "${file.name}". Please try again.`);
 
-  let parsed;
-  try {
-    const clean = textOut.replace(/```json|```/g, '').trim();
-    parsed = JSON.parse(clean);
-  } catch (e) { throw new Error(`Could not understand the AI response for "${file.name}". Please try again.`); }
+  // If the response got cut off mid-generation (usually maxOutputTokens on a
+  // very large document or a high question count), recover as many complete
+  // questions as possible instead of losing the whole file's worth of work —
+  // see _parseQuestionArrayResponse in gemini-uploads.js for how.
+  const clean = textOut.replace(/```json|```/g, '').trim();
+  const { parsed, wasTruncated } = _parseQuestionArrayResponse(clean);
+  if (!parsed) throw new Error(`Could not understand the AI response for "${file.name}". Please try again.`);
 
   if (!Array.isArray(parsed) || !parsed.length) {
     throw new Error(`No questions were generated from "${file.name}". Try uploading a more detailed lecture or reducing the question count.`);
@@ -743,7 +789,7 @@ async function _generateQuestionsFromLectureFile(file, generationPrompt, apiKey,
   if (!cleaned.length) throw new Error(`The AI response for "${file.name}" did not contain any usable questions.`);
 
   report(1, `Finished "${escapeHtml(file.name)}"`);
-  return { cleaned, finishReason };
+  return { cleaned, finishReason, wasTruncated };
 }
 
 async function generateQuizFromLecture() {
@@ -788,7 +834,7 @@ async function generateQuizFromLecture() {
     const generationPrompt = buildGenerationPrompt(qCount, prompt);
 
     let cleaned = [];
-    let anyMaxTokens = false;
+    const truncatedFiles = []; // names of files whose response was cut off / had to be repaired
     const totalFiles = cqLectureFiles.length;
     for (let fi = 0; fi < totalFiles; fi++) {
       // Safe checkpoint — takes effect only if the user clicked Pause, and
@@ -831,7 +877,7 @@ async function generateQuizFromLecture() {
         }
       }
       cleaned = cleaned.concat(result.cleaned);
-      if (result.finishReason === 'MAX_TOKENS') anyMaxTokens = true;
+      if (result.finishReason === 'MAX_TOKENS' || result.wasTruncated) truncatedFiles.push(file.name);
     }
 
     if (!cleaned.length) throw new Error('No questions were generated. Try uploading a more detailed lecture or reducing the question count.');
@@ -840,8 +886,9 @@ async function generateQuizFromLecture() {
     _markQuestionEditDirty(); // freshly generated content is unsaved — warn before it's closed away
 
     let warn = '';
-    if (anyMaxTokens) {
-      warn = ` ⚠️ One of the responses may have been cut off — try splitting very long documents into smaller files.`;
+    if (truncatedFiles.length) {
+      const names = truncatedFiles.map(n => `"${escapeHtml(n)}"`).join(', ');
+      warn = ` ⚠️ The response for ${names} was cut off partway through because the document/question count is very large — everything generated before the cutoff is kept, but try splitting the material into smaller files or reducing the question count for a complete set.`;
     }
 
     const clinicalCount = cleaned.filter(q =>
