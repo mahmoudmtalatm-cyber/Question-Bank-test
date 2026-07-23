@@ -89,6 +89,23 @@ else is plain HTML/CSS/JavaScript.
     keep thinking enabled, since their much larger 65536-token budget and
     genuinely harder task — parsing a whole document's worth of questions
     — benefit more from it.)
+  - Thinking is opt-in per tool: a small 🧠 Thinking pill-checkbox now sits
+    beside 🪄 Refine Question, 🧩 Fill Choices, and ➕ Add Choice on every
+    question card, and beside their bulk counterparts (🧩 Fill Choices
+    (All) / 🪄 Refine Questions (All), in both the post-extraction settings
+    panel and each editor's "Whole Quiz" AI tools panel). These are **five
+    completely independent switches** — `refineSingle`, `fillSingle`,
+    `addChoice`, `fillBulk`, `refineBulk` — persisted in `localStorage`
+    (`aiToolsThinkingSettings`). Turning bulk Fill Choices on has no effect
+    on the per-question Fill Choices button, or on Add Choice, or on
+    Refine, and vice versa; every checkbox for the same tool (a
+    per-question tool's checkbox is duplicated on every question card)
+    stays in sync with that one shared value, without touching any other
+    tool's setting. See `_aiToolsGenConfigExtra` / `_aiToolsSetThinking` /
+    `_renderAiThinkingToggle` in `ai-question-tools.js`. Off remains the
+    default for all five, matching the behaviour above; switching one on
+    lets Gemini's default reasoning pass run for that tool, trading some
+    speed/cost for a chance at higher-quality output.
   - Freshly extracted/generated questions are validated (question text
     present, 2+ filled options, a valid answer selected) before the initial
     save — the same rule the quiz editor already enforced on every later

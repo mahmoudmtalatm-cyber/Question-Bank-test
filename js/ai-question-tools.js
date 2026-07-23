@@ -8,6 +8,83 @@
 
 const AI_TOOLS_MODEL = (typeof CQ_MODEL !== 'undefined') ? CQ_MODEL : 'gemini-2.5-flash';
 
+/* ── Optional "thinking" toggle for the lightweight AI tools ──
+   Refine Question, Fill Choices, Add Choice, and their bulk counterparts
+   (bulk Fill Choices, bulk Refine Questions) all disable Gemini's default
+   reasoning pass (thinkingConfig: { thinkingBudget: 0 }) because these are
+   small, deterministic tasks that don't need it — see the comments at each
+   call site for why that was added in the first place.
+
+   This block lets the user opt back INTO thinking, per tool, if they'd
+   rather trade speed/cost for a chance at higher quality. Each of the five
+   tools below is a COMPLETELY INDEPENDENT switch: turning bulk Fill Choices
+   on has no effect on the per-question Fill Choices button, or on Add
+   Choice, or on Refine, and vice versa. There is exactly one on/off state
+   per tool — not per question — so every checkbox for the same tool
+   (a per-question tool's checkbox appears on every question card; a bulk
+   tool's checkbox appears in more than one panel) always shows and stays
+   in sync with that one shared value. Persisted in localStorage so the
+   choice survives a reload. */
+const AI_TOOLS_THINKING_STORE = 'aiToolsThinkingSettings';
+const _AI_TOOLS_THINKING_DEFAULTS = {
+  refineSingle: false, // 🪄 Refine Question (per-question button)
+  fillSingle:   false, // 🧩 Fill Choices (per-question button)
+  addChoice:    false, // ➕ Add Choice (AI) (per-question button)
+  fillBulk:     false, // 🧩 Fill Choices — bulk (post-extraction pass / "Fill Choices (All)")
+  refineBulk:   false  // 🪄 Refine Questions — bulk (post-extraction pass / "Refine Questions (All)")
+};
+function _aiToolsLoadThinkingSettings() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(AI_TOOLS_THINKING_STORE) || '{}');
+    const out = {};
+    Object.keys(_AI_TOOLS_THINKING_DEFAULTS).forEach(k => { out[k] = !!raw[k]; });
+    return out;
+  } catch (e) {
+    return Object.assign({}, _AI_TOOLS_THINKING_DEFAULTS);
+  }
+}
+let _aiToolsThinking = _aiToolsLoadThinkingSettings();
+function _aiToolsThinkingOn(toolKey) { return !!_aiToolsThinking[toolKey]; }
+/* generationConfig fragment for a given tool: omit thinkingConfig entirely
+   when the user has switched thinking ON (Gemini's own dynamic default then
+   applies, exactly like AI Solve already runs today), or force it to 0 when
+   OFF — the original, still-default, behaviour. */
+function _aiToolsGenConfigExtra(toolKey) {
+  return _aiToolsThinkingOn(toolKey) ? {} : { thinkingConfig: { thinkingBudget: 0 } };
+}
+function _aiToolsSetThinking(toolKey, on) {
+  _aiToolsThinking[toolKey] = !!on;
+  try { localStorage.setItem(AI_TOOLS_THINKING_STORE, JSON.stringify(_aiToolsThinking)); } catch (e) {}
+  // Sync every rendered checkbox for THIS tool only, wherever it appears —
+  // never touches a checkbox belonging to a different tool.
+  document.querySelectorAll(`.ai-thinking-cb[data-tool="${toolKey}"]`).forEach(cb => {
+    cb.checked = on;
+    const wrap = cb.closest('.ai-thinking-toggle');
+    if (wrap) wrap.classList.toggle('ai-thinking-on', on);
+  });
+}
+const _AI_THINKING_LABELS = {
+  refineSingle: 'Refine Question',
+  fillSingle:   'Fill Choices',
+  addChoice:    'Add Choice',
+  fillBulk:     'Fill Choices (bulk)',
+  refineBulk:   'Refine Questions (bulk)'
+};
+/* Compact pill-checkbox, safe to render many times for the same toolKey
+   (every per-question card renders its own copy) — all copies stay in sync
+   via the querySelectorAll sync in _aiToolsSetThinking above. */
+function _renderAiThinkingToggle(toolKey, extraStyle) {
+  const on = _aiToolsThinkingOn(toolKey);
+  const label = _AI_THINKING_LABELS[toolKey] || toolKey;
+  return `<label class="ai-thinking-toggle${on ? ' ai-thinking-on' : ''}" style="${extraStyle || ''}"
+      title="When ON, lets Gemini think before answering for ${escapeHtml(label)} — can improve quality but is slower and uses more tokens. OFF by default, since this task is small and quick enough not to need it.">
+    <input type="checkbox" class="ai-thinking-cb" data-tool="${toolKey}" ${on ? 'checked' : ''}
+      onchange="_aiToolsSetThinking('${toolKey}', this.checked)">
+    <span class="ai-thinking-cb-box"></span>
+    <span class="ai-thinking-cb-label">🧠 Thinking</span>
+  </label>`;
+}
+
 // Per-question UI state for the "Custom Instructions" box (whether it's
 // open, and its draft text) — keyed by `${editorKey}_${i}` since each
 // editor keeps its own independent set of question cards.
@@ -217,6 +294,7 @@ function _renderAiRefineTools(editorKey, i) {
       <button class="ai-tool-stop-btn" type="button" id="aiRefineStopBtn_${editorKey}_${i}"
         style="${busy && activeAction === 'refine' ? 'display:inline-block;' : ''}"
         title="Stop Refine Question" onclick="_aiToolsStopAction('${editorKey}', ${i})">⏹ Stop</button>
+      ${_renderAiThinkingToggle('refineSingle')}
     </div>
     <div id="aiSourcePicker_${editorKey}_${i}" class="ai-source-picker" style="display:none;"></div>
     <div id="aiRefineInstrPicker_${editorKey}_${i}" class="ai-source-picker" style="display:none;"></div>
@@ -237,7 +315,8 @@ function _renderAiChoiceTools(editorKey, i, optCount, nextKey) {
       style="background:var(--correct-bg);color:var(--correct-fg);border-color:var(--green-pale-border);">🤖 Add Choice (AI)</button>
       <button class="ai-tool-stop-btn" type="button" id="aiAddChoiceStopBtn_${editorKey}_${i}"
         style="${busy && activeAction === 'addChoice' ? 'display:inline-block;' : ''}"
-        title="Stop Add Choice" onclick="_aiToolsStopAction('${editorKey}', ${i})">⏹ Stop</button>`;
+        title="Stop Add Choice" onclick="_aiToolsStopAction('${editorKey}', ${i})">⏹ Stop</button>
+      ${_renderAiThinkingToggle('addChoice')}`;
   }
   if (optCount < 4 && nextKey) {
     html += `<button class="cq-edit-reask-btn" type="button" id="aiFillChoicesBtn_${editorKey}_${i}" ${busy ? 'disabled' : ''}
@@ -246,7 +325,8 @@ function _renderAiChoiceTools(editorKey, i, optCount, nextKey) {
       style="background:var(--unanswered-bg);color:var(--unanswered-fg);border-color:var(--amber-strong);">🧩 Fill Choices (AI)</button>
       <button class="ai-tool-stop-btn" type="button" id="aiFillChoicesStopBtn_${editorKey}_${i}"
         style="${busy && activeAction === 'fillChoices' ? 'display:inline-block;' : ''}"
-        title="Stop Fill Choices" onclick="_aiToolsStopAction('${editorKey}', ${i})">⏹ Stop</button>`;
+        title="Stop Fill Choices" onclick="_aiToolsStopAction('${editorKey}', ${i})">⏹ Stop</button>
+      ${_renderAiThinkingToggle('fillSingle')}`;
   }
   html += `</div>`;
   return html;
@@ -264,7 +344,7 @@ function _renderAiChoiceTools(editorKey, i, optCount, nextKey) {
    the bulk post-extraction pass (cqBulkRefineQuestions) can reuse it without
    needing an editor/card in the DOM. Returns the refined question string,
    or throws on failure. */
-async function _aiRefineQuestionCall(apiKey, questions, q, custom, token) {
+async function _aiRefineQuestionCall(apiKey, questions, q, custom, token, toolKey) {
   const optEntries = getOptionEntries(q);
   const optsText = optEntries.map(([k, v]) => `${k}. ${v}`).join('\n') || '(none yet)';
   const { textBlock: caseBlock, imagePart } = _aiToolsCaseContext(questions, q);
@@ -300,11 +380,14 @@ Respond ONLY with a JSON object: {"question": "the refined question text"}. No m
       // Gemini 2.5 Flash reasons by default, and those "thinking" tokens are
       // drawn from the SAME maxOutputTokens budget as the visible JSON
       // answer. For a short, deterministic rewrite like this, that reasoning
-      // pass isn't needed — and left dynamic, it could unpredictably eat
-      // most of the budget, leaving too little for the actual answer and
-      // truncating it mid-string. Disabling it reclaims the whole budget for
-      // the real output and is also faster.
-      thinkingConfig: { thinkingBudget: 0 }
+      // pass isn't needed by default — and left dynamic, it could
+      // unpredictably eat most of the budget, leaving too little for the
+      // actual answer and truncating it mid-string. Off by default reclaims
+      // the whole budget for the real output and is also faster; the user
+      // can opt back into thinking per-tool via the 🧠 Thinking checkbox
+      // (see _aiToolsGenConfigExtra) if they'd rather trade that for a
+      // chance at higher quality.
+      ..._aiToolsGenConfigExtra(toolKey || 'refineSingle')
     }
   }, { cancelToken: token, apiKey });
   const textOut = ((data.candidates || [])[0]?.content?.parts || []).map(p => p.text || '').join('');
@@ -338,7 +421,7 @@ async function aiRefineQuestion(editorKey, i) {
   _aiToolsSetStatus(editorKey, i, _aiToolsLoadingHTML('🪄 Refining question…'));
 
   try {
-    q.question = await _aiRefineQuestionCall(apiKey, questions, q, custom, token);
+    q.question = await _aiRefineQuestionCall(apiKey, questions, q, custom, token, 'refineSingle');
     _markQuestionEditDirty();
     ed.rerender(); // rebuilds this card fresh, which also naturally re-enables its buttons
   } catch (e) {
@@ -355,7 +438,7 @@ async function aiRefineQuestion(editorKey, i) {
    Asks for exactly `count` new, plausible-but-incorrect answer choices that
    fit the question's subject, style, and difficulty — distinct from every
    existing choice and from each other, and not generic filler. */
-async function _aiGenerateDistractors(apiKey, questions, q, optEntries, count, token) {
+async function _aiGenerateDistractors(apiKey, questions, q, optEntries, count, token, toolKey) {
   const existingText = optEntries.map(([k, v]) => `${k}. ${v}`).join('\n') || '(none)';
   const correctVal = (optEntries.find(([k]) => k === q.answer) || [])[1] || '';
   const { textBlock: caseBlock, imagePart } = _aiToolsCaseContext(questions, q);
@@ -389,11 +472,14 @@ Respond ONLY with a JSON object: {"choices": [${Array(count).fill('"..."').join(
     contents: [{ parts }],
     generationConfig: {
       responseMimeType: 'application/json', temperature: 0.7, maxOutputTokens: 2048,
-      // See matching comment in aiRefineQuestion — writing a few distractor
-      // choices doesn't need Gemini 2.5 Flash's default reasoning pass, and
-      // disabling it frees the full token budget for the actual answer
-      // instead of risking it being squeezed out and truncated.
-      thinkingConfig: { thinkingBudget: 0 }
+      // See matching comment in _aiRefineQuestionCall — writing a few
+      // distractor choices doesn't need Gemini 2.5 Flash's default
+      // reasoning pass, so it's off by default, freeing the full token
+      // budget for the actual answer instead of risking it being squeezed
+      // out and truncated. Each caller (Fill Choices single/bulk, Add
+      // Choice) passes its own toolKey, so the user's 🧠 Thinking choice
+      // for one of those never affects the others.
+      ..._aiToolsGenConfigExtra(toolKey || 'fillSingle')
     }
   }, { cancelToken: token, apiKey });
   const textOut = ((data.candidates || [])[0]?.content?.parts || []).map(p => p.text || '').join('');
@@ -456,7 +542,7 @@ async function aiFillChoices(editorKey, i) {
   _aiToolsSetStatus(editorKey, i, _aiToolsLoadingHTML(`🧩 Filling ${missing.length} more choice${missing.length !== 1 ? 's' : ''}…`));
 
   try {
-    const newVals = await _aiGenerateDistractors(apiKey, questions, q, optEntries, missing.length, token);
+    const newVals = await _aiGenerateDistractors(apiKey, questions, q, optEntries, missing.length, token, 'fillSingle');
     if (!q.optionsOrder) q.optionsOrder = optEntries.map(([k, v]) => ({ key: k, value: v }));
     missing.forEach((optKey, idx) => {
       const val = newVals[idx] || '';
@@ -515,7 +601,7 @@ async function aiAddChoice(editorKey, i) {
   _aiToolsSetStatus(editorKey, i, _aiToolsLoadingHTML('🤖 AI is writing a new choice…'));
 
   try {
-    const newVals = await _aiGenerateDistractors(apiKey, questions, q, optEntries, 1, token);
+    const newVals = await _aiGenerateDistractors(apiKey, questions, q, optEntries, 1, token, 'addChoice');
     const val = newVals[0] || '';
     if (!q.optionsOrder) q.optionsOrder = optEntries.map(([k, v]) => ({ key: k, value: v }));
     q.options[nextKey] = val;

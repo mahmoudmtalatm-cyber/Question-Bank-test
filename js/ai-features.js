@@ -1647,7 +1647,8 @@ function _renderBulkAiToolsPanel(editorKey, questions) {
         <button class="ai-tool-stop-btn" type="button" id="${editorKey}BulkFillStopBtn"
           style="${busy && activeTool === 'Fill' ? 'display:inline-block;' : ''}"
           title="Stop Fill Choices" onclick="_editorBulkStopTool('${editorKey}')">⏹ Stop</button>
-        <span class="cq-bulk-ai-no-opts">Tops up missing answer choices — no settings needed.</span>
+        <span class="cq-bulk-ai-no-opts">Tops up missing answer choices.</span>
+        ${_renderAiThinkingToggle('fillBulk')}
       </div>
     </div>
 
@@ -1659,6 +1660,7 @@ function _renderBulkAiToolsPanel(editorKey, questions) {
         <button class="ai-tool-stop-btn" type="button" id="${editorKey}BulkRefineStopBtn"
           style="${busy && activeTool === 'Refine' ? 'display:inline-block;' : ''}"
           title="Stop Refine Questions" onclick="_editorBulkStopTool('${editorKey}')">⏹ Stop</button>
+        ${_renderAiThinkingToggle('refineBulk')}
       </div>
       <details class="cq-bulk-ai-opts">
         <summary>⚙️ Refine Questions settings</summary>

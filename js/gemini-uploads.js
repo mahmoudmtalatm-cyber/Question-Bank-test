@@ -846,7 +846,7 @@ async function cqBulkFillChoices(questions, statusEl, cancelToken) {
       const missing = _AI_TOOLS_ALL_KEYS.filter(k => !usedKeys.includes(k)).slice(0, Math.max(0, 4 - optEntries.length));
       if (!missing.length) continue;
       const answerBefore = q.answer;
-      const newVals = await _aiGenerateDistractors(apiKey, questions, q, optEntries, missing.length, cancelToken);
+      const newVals = await _aiGenerateDistractors(apiKey, questions, q, optEntries, missing.length, cancelToken, 'fillBulk');
       if (!q.optionsOrder) q.optionsOrder = optEntries.map(([k, v]) => ({ key: k, value: v }));
       missing.forEach((key, idx) => {
         const val = newVals[idx] || '';
@@ -912,7 +912,7 @@ async function cqBulkRefineQuestions(questions, customInstructions, statusEl, ca
         `🪄 Refining question wording… (${n + 1} of ${idxs.length})`, (n / idxs.length) * 100);
     }
     try {
-      q.question = await _aiRefineQuestionCall(apiKey, questions, q, custom, cancelToken);
+      q.question = await _aiRefineQuestionCall(apiKey, questions, q, custom, cancelToken, 'refineBulk');
       done++;
     } catch (e) {
       if (e._cancelled) {
