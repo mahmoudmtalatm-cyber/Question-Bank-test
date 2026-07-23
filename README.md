@@ -48,7 +48,10 @@ else is plain HTML/CSS/JavaScript.
     (`CQ_EXTRACTION_PROMPT` in `gemini-uploads.js`) explicitly tells the
     model to treat the document as one continuous flow — so a question
     whose stem, answer choices, or answer key spans a page break gets
-    merged correctly instead of being truncated or dropped.
+    merged correctly instead of being truncated or dropped. The prompt
+    also expects pages to mix portrait and landscape orientation (or be
+    entirely one or the other) — a PDF doesn't need to be pre-formatted
+    into a single uniform orientation for extraction to work correctly.
 - **Admin panel** — publish quizzes into the official bank, manage the
   curriculum tree (years/modules/subjects), manage other admins and their
   permissions, and edit/split/reorder published lectures.
