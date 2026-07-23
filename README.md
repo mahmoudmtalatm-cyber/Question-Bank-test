@@ -105,7 +105,18 @@ else is plain HTML/CSS/JavaScript.
     `_renderAiThinkingToggle` in `ai-question-tools.js`. Off remains the
     default for all five, matching the behaviour above; switching one on
     lets Gemini's default reasoning pass run for that tool, trading some
-    speed/cost for a chance at higher-quality output.
+    speed/cost for a chance at higher-quality output. Each pill is nested
+    directly against its own trigger button (in its own tight flex group,
+    separate from that row's ⏹ Stop button) and color-matched to it —
+    violet for Refine, amber for Fill Choices, green for Add Choice — so
+    it's visually unambiguous which checkbox controls which tool even when
+    several buttons sit close together on the same row. Every row (and each
+    button+toggle group within it) uses `flex-wrap: wrap`, so on narrow/
+    mobile screens a whole cluster drops to its own line — or, in the
+    worst case, the toggle drops directly under its own button — instead of
+    ever forcing the row to scroll sideways; a `max-width: 480px` rule
+    also shrinks the pill itself to match the app's existing small-screen
+    sizing for other AI-tool controls.
   - Freshly extracted/generated questions are validated (question text
     present, 2+ filled options, a valid answer selected) before the initial
     save — the same rule the quiz editor already enforced on every later

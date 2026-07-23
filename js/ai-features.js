@@ -1641,26 +1641,30 @@ function _renderBulkAiToolsPanel(editorKey, questions) {
 
     <div class="cq-bulk-ai-tool">
       <div class="cq-bulk-ai-tool-row">
-        <button class="cq-btn cq-btn-secondary" id="${editorKey}BulkFillBtn" type="button"
-          ${busy ? 'disabled' : ''} onclick="_editorBulkFillChoices('${editorKey}')"
-          style="background:var(--unanswered-fg);color:#fff;">🧩 Fill Choices (All)</button>
+        <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+          <button class="cq-btn cq-btn-secondary" id="${editorKey}BulkFillBtn" type="button"
+            ${busy ? 'disabled' : ''} onclick="_editorBulkFillChoices('${editorKey}')"
+            style="background:var(--unanswered-fg);color:#fff;">🧩 Fill Choices (All)</button>
+          ${_renderAiThinkingToggle('fillBulk', 'amber')}
+        </div>
         <button class="ai-tool-stop-btn" type="button" id="${editorKey}BulkFillStopBtn"
           style="${busy && activeTool === 'Fill' ? 'display:inline-block;' : ''}"
           title="Stop Fill Choices" onclick="_editorBulkStopTool('${editorKey}')">⏹ Stop</button>
         <span class="cq-bulk-ai-no-opts">Tops up missing answer choices.</span>
-        ${_renderAiThinkingToggle('fillBulk')}
       </div>
     </div>
 
     <div class="cq-bulk-ai-tool">
       <div class="cq-bulk-ai-tool-row">
-        <button class="cq-btn cq-btn-secondary" id="${editorKey}BulkRefineBtn" type="button"
-          ${busy ? 'disabled' : ''} onclick="_editorBulkRefineQuestions('${editorKey}')"
-          style="background:var(--violet-dark);color:#fff;">🪄 Refine Questions (All)</button>
+        <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+          <button class="cq-btn cq-btn-secondary" id="${editorKey}BulkRefineBtn" type="button"
+            ${busy ? 'disabled' : ''} onclick="_editorBulkRefineQuestions('${editorKey}')"
+            style="background:var(--violet-dark);color:#fff;">🪄 Refine Questions (All)</button>
+          ${_renderAiThinkingToggle('refineBulk', 'violet')}
+        </div>
         <button class="ai-tool-stop-btn" type="button" id="${editorKey}BulkRefineStopBtn"
           style="${busy && activeTool === 'Refine' ? 'display:inline-block;' : ''}"
           title="Stop Refine Questions" onclick="_editorBulkStopTool('${editorKey}')">⏹ Stop</button>
-        ${_renderAiThinkingToggle('refineBulk')}
       </div>
       <details class="cq-bulk-ai-opts">
         <summary>⚙️ Refine Questions settings</summary>

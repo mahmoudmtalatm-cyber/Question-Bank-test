@@ -72,11 +72,19 @@ const _AI_THINKING_LABELS = {
 };
 /* Compact pill-checkbox, safe to render many times for the same toolKey
    (every per-question card renders its own copy) — all copies stay in sync
-   via the querySelectorAll sync in _aiToolsSetThinking above. */
-function _renderAiThinkingToggle(toolKey, extraStyle) {
+   via the querySelectorAll sync in _aiToolsSetThinking above.
+   `variant` colors the pill to match the button it belongs to, so it reads
+   as part of that specific tool rather than a generic setting floating
+   nearby: 'violet' (default, Refine), 'amber' (Fill Choices), 'green'
+   (Add Choice). Callers also nest this right next to its own trigger
+   button (see _renderAiRefineTools / _renderAiChoiceTools) — color plus
+   placement together make the pairing unambiguous even when a Stop button
+   sits close by too. */
+function _renderAiThinkingToggle(toolKey, variant, extraStyle) {
   const on = _aiToolsThinkingOn(toolKey);
   const label = _AI_THINKING_LABELS[toolKey] || toolKey;
-  return `<label class="ai-thinking-toggle${on ? ' ai-thinking-on' : ''}" style="${extraStyle || ''}"
+  const variantClass = variant && variant !== 'violet' ? ` ai-thinking-${variant}` : '';
+  return `<label class="ai-thinking-toggle${variantClass}${on ? ' ai-thinking-on' : ''}" style="${extraStyle || ''}"
       title="When ON, lets Gemini think before answering for ${escapeHtml(label)} — can improve quality but is slower and uses more tokens. OFF by default, since this task is small and quick enough not to need it.">
     <input type="checkbox" class="ai-thinking-cb" data-tool="${toolKey}" ${on ? 'checked' : ''}
       onchange="_aiToolsSetThinking('${toolKey}', this.checked)">
@@ -267,7 +275,7 @@ function _renderAiRefineTools(editorKey, i) {
   const busy = _aiToolsIsBusy(editorKey, i);
   const activeAction = _aiToolsActiveAction[_aiToolsKey(editorKey, i)];
   return `
-    <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin:-2px 0 8px;">
+    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:-2px 0 8px;">
       <div style="display:flex;">
         <button class="cq-edit-reask-btn" type="button" id="cqAiSolveBtn_${editorKey}_${i}" ${busy ? 'disabled' : ''}
           title="Ask AI to solve this question using the source chosen below"
@@ -281,20 +289,22 @@ function _renderAiRefineTools(editorKey, i) {
       <button class="ai-tool-stop-btn" type="button" id="cqAiSolveStopBtn_${editorKey}_${i}"
         style="${busy && activeAction === 'solve' ? 'display:inline-block;' : ''}"
         title="Stop AI Solve" onclick="_aiToolsStopAction('${editorKey}', ${i})">⏹ Stop</button>
-      <div style="display:flex;">
-        <button class="cq-edit-reask-btn" type="button" id="aiRefineBtn_${editorKey}_${i}" ${busy ? 'disabled' : ''}
-          title="Use AI to rewrite this question with clear, exam-style phrasing and no grammar mistakes or typos"
-          onclick="aiRefineQuestion('${editorKey}', ${i})"
-          style="background:var(--violet-pale);color:var(--violet-dark);border-color:var(--violet-border);border-top-right-radius:0;border-bottom-right-radius:0;">🪄 Refine Question</button>
-        <button class="cq-edit-reask-btn" type="button" id="aiRefineInstrCaret_${editorKey}_${i}" ${busy ? 'disabled' : ''}
-          title="Optional custom instructions used only when refining this question"
-          onclick="_toggleAiRefineInstrPicker('${editorKey}', ${i})"
-          style="background:#F3EEFC;color:var(--violet-dark);border-color:var(--violet-border);border-left:none;border-top-left-radius:0;border-bottom-left-radius:0;">${_aiRefineInstrCaretLabel(editorKey, i)} ▾</button>
+      <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+        <div style="display:flex;">
+          <button class="cq-edit-reask-btn" type="button" id="aiRefineBtn_${editorKey}_${i}" ${busy ? 'disabled' : ''}
+            title="Use AI to rewrite this question with clear, exam-style phrasing and no grammar mistakes or typos"
+            onclick="aiRefineQuestion('${editorKey}', ${i})"
+            style="background:var(--violet-pale);color:var(--violet-dark);border-color:var(--violet-border);border-top-right-radius:0;border-bottom-right-radius:0;">🪄 Refine Question</button>
+          <button class="cq-edit-reask-btn" type="button" id="aiRefineInstrCaret_${editorKey}_${i}" ${busy ? 'disabled' : ''}
+            title="Optional custom instructions used only when refining this question"
+            onclick="_toggleAiRefineInstrPicker('${editorKey}', ${i})"
+            style="background:#F3EEFC;color:var(--violet-dark);border-color:var(--violet-border);border-left:none;border-top-left-radius:0;border-bottom-left-radius:0;">${_aiRefineInstrCaretLabel(editorKey, i)} ▾</button>
+        </div>
+        ${_renderAiThinkingToggle('refineSingle', 'violet')}
       </div>
       <button class="ai-tool-stop-btn" type="button" id="aiRefineStopBtn_${editorKey}_${i}"
         style="${busy && activeAction === 'refine' ? 'display:inline-block;' : ''}"
         title="Stop Refine Question" onclick="_aiToolsStopAction('${editorKey}', ${i})">⏹ Stop</button>
-      ${_renderAiThinkingToggle('refineSingle')}
     </div>
     <div id="aiSourcePicker_${editorKey}_${i}" class="ai-source-picker" style="display:none;"></div>
     <div id="aiRefineInstrPicker_${editorKey}_${i}" class="ai-source-picker" style="display:none;"></div>
@@ -307,26 +317,30 @@ function _renderAiRefineTools(editorKey, i) {
 function _renderAiChoiceTools(editorKey, i, optCount, nextKey) {
   const busy = _aiToolsIsBusy(editorKey, i);
   const activeAction = _aiToolsActiveAction[_aiToolsKey(editorKey, i)];
-  let html = `<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:5px;align-items:center;">`;
+  let html = `<div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:5px;align-items:center;">`;
   if (nextKey) {
-    html += `<button class="cq-edit-reask-btn" type="button" id="aiAddChoiceBtn_${editorKey}_${i}" ${busy ? 'disabled' : ''}
-      title="Let AI write one more plausible answer choice for this question"
-      onclick="aiAddChoice('${editorKey}', ${i})"
-      style="background:var(--correct-bg);color:var(--correct-fg);border-color:var(--green-pale-border);">🤖 Add Choice (AI)</button>
+    html += `<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+      <button class="cq-edit-reask-btn" type="button" id="aiAddChoiceBtn_${editorKey}_${i}" ${busy ? 'disabled' : ''}
+        title="Let AI write one more plausible answer choice for this question"
+        onclick="aiAddChoice('${editorKey}', ${i})"
+        style="background:var(--correct-bg);color:var(--correct-fg);border-color:var(--green-pale-border);">🤖 Add Choice (AI)</button>
+      ${_renderAiThinkingToggle('addChoice', 'green')}
+      </div>
       <button class="ai-tool-stop-btn" type="button" id="aiAddChoiceStopBtn_${editorKey}_${i}"
         style="${busy && activeAction === 'addChoice' ? 'display:inline-block;' : ''}"
-        title="Stop Add Choice" onclick="_aiToolsStopAction('${editorKey}', ${i})">⏹ Stop</button>
-      ${_renderAiThinkingToggle('addChoice')}`;
+        title="Stop Add Choice" onclick="_aiToolsStopAction('${editorKey}', ${i})">⏹ Stop</button>`;
   }
   if (optCount < 4 && nextKey) {
-    html += `<button class="cq-edit-reask-btn" type="button" id="aiFillChoicesBtn_${editorKey}_${i}" ${busy ? 'disabled' : ''}
-      title="Let AI fill in the remaining choices (up to 4 total)"
-      onclick="aiFillChoices('${editorKey}', ${i})"
-      style="background:var(--unanswered-bg);color:var(--unanswered-fg);border-color:var(--amber-strong);">🧩 Fill Choices (AI)</button>
+    html += `<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+      <button class="cq-edit-reask-btn" type="button" id="aiFillChoicesBtn_${editorKey}_${i}" ${busy ? 'disabled' : ''}
+        title="Let AI fill in the remaining choices (up to 4 total)"
+        onclick="aiFillChoices('${editorKey}', ${i})"
+        style="background:var(--unanswered-bg);color:var(--unanswered-fg);border-color:var(--amber-strong);">🧩 Fill Choices (AI)</button>
+      ${_renderAiThinkingToggle('fillSingle', 'amber')}
+      </div>
       <button class="ai-tool-stop-btn" type="button" id="aiFillChoicesStopBtn_${editorKey}_${i}"
         style="${busy && activeAction === 'fillChoices' ? 'display:inline-block;' : ''}"
-        title="Stop Fill Choices" onclick="_aiToolsStopAction('${editorKey}', ${i})">⏹ Stop</button>
-      ${_renderAiThinkingToggle('fillSingle')}`;
+        title="Stop Fill Choices" onclick="_aiToolsStopAction('${editorKey}', ${i})">⏹ Stop</button>`;
   }
   html += `</div>`;
   return html;
